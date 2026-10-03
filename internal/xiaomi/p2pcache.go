@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/app"
+	"github.com/AlexxIT/go2rtc/pkg/core"
+	"github.com/AlexxIT/go2rtc/pkg/xiaomi/legacy"
 )
 
 // Every connection to a Xiaomi camera starts with a cloud call: the cloud
@@ -143,13 +145,15 @@ func rememberP2P(did, rawURL string) {
 }
 
 // cachedP2PURL rebuilds the dial URL for a device from the last credentials
-// the cloud issued for it. The bool is false when none are known.
-func cachedP2PURL(u *url.URL, did string) (string, time.Duration, bool) {
+// the cloud issued for it, and says how old they are and for how long the
+// device has been seen with the key they are bound to. The bool is false
+// when none are known.
+func cachedP2PURL(u *url.URL, did string) (string, time.Duration, time.Duration, bool) {
 	p2pCacheMu.Lock()
 	creds := p2pCache[did]
 	p2pCacheMu.Unlock()
 	if creds == nil {
-		return "", 0, false
+		return "", 0, 0, false
 	}
 	query := u.Query()
 	for key, value := range creds.Query {
@@ -157,5 +161,44 @@ func cachedP2PURL(u *url.URL, did string) (string, time.Duration, bool) {
 	}
 	cached := *u
 	cached.RawQuery = query.Encode()
-	return cached.String(), time.Since(creds.IssuedAt), true
+	return cached.String(), time.Since(creds.IssuedAt), time.Since(creds.KeySince), true
+}
+
+// forgetP2P drops the credentials for a device. Called when a dial made with
+// them brought no media: the device has rotated its key, and keeping them
+// would cost every next attempt during a cloud outage another stalled dial.
+func forgetP2P(did string) {
+	p2pCacheMu.Lock()
+	_, had := p2pCache[did]
+	delete(p2pCache, did)
+	p2pCacheMu.Unlock()
+	if had {
+		saveP2PCache()
+	}
+}
+
+// cachedProducer is a producer dialled with cached credentials. If it ends
+// without a single byte received, the credentials were stale and are dropped.
+type cachedProducer struct {
+	core.Producer
+	did string
+	age time.Duration
+}
+
+func (p *cachedProducer) Start() error {
+	err := p.Producer.Start()
+	if lp, ok := p.Producer.(*legacy.Producer); ok && lp.Recv == 0 {
+		log.Warn().Msgf(
+			"xiaomi: cached P2P credentials for did=%s (issued %s ago) brought no media, dropping them",
+			p.did, p.age.Round(time.Second),
+		)
+		forgetP2P(p.did)
+	}
+	return err
+}
+
+// MarshalJSON keeps the API output identical to the wrapped producer's: the
+// stream listing is what clients use to tell whether a stream carries media.
+func (p *cachedProducer) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p.Producer)
 }

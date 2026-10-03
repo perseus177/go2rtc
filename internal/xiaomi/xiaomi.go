@@ -38,16 +38,37 @@ func Init() {
 			return nil, err
 		}
 
+		var cached *cachedProducer
 		if u.User != nil {
-			rawURL, err = getCameraURL(u)
+			var age time.Duration
+			rawURL, age, err = getCameraURL(u)
 			if err != nil {
 				return nil, err
+			}
+			if age > 0 {
+				cached = &cachedProducer{did: u.Query().Get("did"), age: age}
 			}
 		}
 
 		log.Debug().Msgf("xiaomi: dial %s", rawURL)
 
-		return xiaomi.Dial(rawURL)
+		prod, err := xiaomi.Dial(rawURL)
+		if err != nil {
+			if cached != nil {
+				// Could not even connect with them; they are no good.
+				log.Warn().Msgf(
+					"xiaomi: cached P2P credentials for did=%s rejected (%s), dropping them",
+					cached.did, err,
+				)
+				forgetP2P(cached.did)
+			}
+			return nil, err
+		}
+		if cached != nil {
+			cached.Producer = prod
+			return cached, nil
+		}
+		return prod, nil
 	})
 
 	api.HandleFunc("api/xiaomi", apiXiaomi)
@@ -148,25 +169,31 @@ func cloudUserRequest(user *url.Userinfo, apiURL, params string) ([]byte, error)
 // getCameraURL completes the dial URL with the P2P credentials the cloud
 // issues. When the cloud can't be reached, the last credentials it issued for
 // this device are used instead; they keep working until the device rotates
-// its key (see p2pcache.go).
-func getCameraURL(u *url.URL) (string, error) {
+// its key (see p2pcache.go). The duration is how old reused credentials are,
+// and zero when they came fresh from the cloud.
+func getCameraURL(u *url.URL) (string, time.Duration, error) {
 	did := u.Query().Get("did")
 
 	rawURL, err := getCloudCameraURL(u)
 	if err == nil {
 		rememberP2P(did, rawURL)
-		return rawURL, nil
+		return rawURL, 0, nil
 	}
 
-	cached, age, ok := cachedP2PURL(u, did)
+	cached, age, keyAge, ok := cachedP2PURL(u, did)
 	if !ok {
-		return "", err
+		return "", 0, err
 	}
+	// The key age is the number to watch: devices were seen to rotate the key
+	// after about an hour, and the credentials die with it.
 	log.Warn().Msgf(
-		"xiaomi: cloud unavailable (%s), reusing P2P credentials for did=%s issued %s ago",
-		err, did, age.Round(time.Second),
+		"xiaomi: cloud unavailable (%s), reusing P2P credentials for did=%s issued %s ago; the device key they are bound to was first seen %s ago",
+		err, did, age.Round(time.Second), keyAge.Round(time.Second),
 	)
-	return cached, nil
+	if age <= 0 {
+		age = time.Nanosecond
+	}
+	return cached, age, nil
 }
 
 func getCloudCameraURL(url *url.URL) (string, error) {
