@@ -30,6 +30,8 @@ func Init() {
 
 	log = app.GetLogger("xiaomi")
 
+	loadP2PCache()
+
 	streams.HandleFunc("xiaomi", func(rawURL string) (core.Producer, error) {
 		u, err := url.Parse(rawURL)
 		if err != nil {
@@ -143,7 +145,31 @@ func cloudUserRequest(user *url.Userinfo, apiURL, params string) ([]byte, error)
 	return cloudRequest(userID, region, apiURL, params)
 }
 
-func getCameraURL(url *url.URL) (string, error) {
+// getCameraURL completes the dial URL with the P2P credentials the cloud
+// issues. When the cloud can't be reached, the last credentials it issued for
+// this device are used instead; they keep working until the device rotates
+// its key (see p2pcache.go).
+func getCameraURL(u *url.URL) (string, error) {
+	did := u.Query().Get("did")
+
+	rawURL, err := getCloudCameraURL(u)
+	if err == nil {
+		rememberP2P(did, rawURL)
+		return rawURL, nil
+	}
+
+	cached, age, ok := cachedP2PURL(u, did)
+	if !ok {
+		return "", err
+	}
+	log.Warn().Msgf(
+		"xiaomi: cloud unavailable (%s), reusing P2P credentials for did=%s issued %s ago",
+		err, did, age.Round(time.Second),
+	)
+	return cached, nil
+}
+
+func getCloudCameraURL(url *url.URL) (string, error) {
 	model := url.Query().Get("model")
 
 	// It is not known which models need to be awakened.
