@@ -30,6 +30,9 @@ func Dial(rawURL string) (*Producer, error) {
 
 	medias, err := probe(client)
 	if err != nil {
+		// StartMedia has already woken the camera; without a stop it would
+		// stay up after a failed probe.
+		_ = client.StopMedia()
 		_ = client.Close()
 		return nil, err
 	}

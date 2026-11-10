@@ -249,6 +249,16 @@ func (c *Client) StartMedia(video, audio string) error {
 }
 
 func (c *Client) StopMedia() error {
+	if c.model == ModelIMILABEC2 {
+		// Same rule as in StartMedia: the gateway ignores commands without
+		// "mac". A bare stop therefore stopped nothing, and the battery
+		// camera was left streaming to the gateway after the viewer had left,
+		// which is the likely reason it drained in days instead of months.
+		return errors.Join(
+			c.WriteCommandJSON(cmdVideoStop, `{"mac":"%s"}`, c.mac),
+			c.WriteCommandJSON(cmdAudioStop, `{"mac":"%s"}`, c.mac),
+		)
+	}
 	return errors.Join(
 		c.WriteCommandJSON(cmdVideoStop, `{}`),
 		c.WriteCommand(cmdVideoStop, make([]byte, 8)),
